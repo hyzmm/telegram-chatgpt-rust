@@ -3,8 +3,11 @@ use openai_chatgpt_api::{
     ChatGpt, ChatGptChatFormat, ChatGptRequestChatCompletions, ChatGptResponse,
 };
 
-pub async fn ask_chat_gpt(conversation_history: Vec<ChatGptChatFormat>) -> anyhow::Result<String> {
-    let chat_gpt = ChatGpt::new("OPEN_AI_TOKEN");
+pub async fn ask_chat_gpt(
+    open_api_token: &str,
+    conversation_history: Vec<ChatGptChatFormat>,
+) -> anyhow::Result<String> {
+    let chat_gpt = ChatGpt::new(open_api_token);
 
     let request = ChatGptRequestChatCompletions::new("gpt-3.5-turbo", conversation_history);
 
