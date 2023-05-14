@@ -1,3 +1,4 @@
+use std::process::Termination;
 use std::sync::Arc;
 
 use openai_chatgpt_api::ChatGptChatFormat;
@@ -6,8 +7,8 @@ use teloxide::{prelude::*, utils::command::BotCommands};
 use tokio::sync::Mutex;
 
 use crate::chat_gpt::ask_chat_gpt;
-use crate::storages;
-use crate::storages::Roles;
+use crate::storages::{self};
+use crate::storages::{Role, Roles};
 use crate::utils::telegram_utils::escape_markdown_v2_reversed_chars;
 
 #[derive(BotCommands, Clone)]
@@ -22,9 +23,14 @@ enum Command {
     Clear,
     #[command(description = "list all roles")]
     ListRoles,
+    #[command(parse_with = "split", description = "add a role")]
+    NewRole { role_name: String, system: String },
+    #[command(description = "delete a role")]
+    DeleteRole { role_name: String },
 }
 
-type ConversationHistory = Arc<Mutex<Vec<ChatGptChatFormat>>>;
+type ConversationHistoryRef = Arc<Mutex<Vec<ChatGptChatFormat>>>;
+type RolesRef = Arc<Mutex<Roles>>;
 
 #[derive(Clone)]
 struct Settings {
@@ -43,14 +49,20 @@ pub async fn startup() -> Result<(), anyhow::Error> {
     let settings = Settings::from_env();
     let bot = Bot::from_env();
 
-    let storage_roles = storages::get_roles()?;
+    let saved_roles = storages::get_roles()?;
 
     let ignore_update = |_upd| Box::pin(async {});
 
-    let chat_gpt_system = ChatGptChatFormat::new_system(
-        "You are my personal assistant. Most of questions I asked are related to programming. Your reply to me can be in Markdown format.",
-    );
+    let default_system = saved_roles
+        .values()
+        .next()
+        .map(|role| role.system.as_str())
+        .unwrap_or("You are a helpful assistant.");
+    let chat_gpt_system = ChatGptChatFormat::new_system(default_system);
     let conversation_history = Arc::new(Mutex::new(vec![chat_gpt_system]));
+
+    let saved_roles_ref = Arc::new(Mutex::new(saved_roles));
+
     let handler = Update::filter_message()
         .branch(
             dptree::entry()
@@ -60,7 +72,11 @@ pub async fn startup() -> Result<(), anyhow::Error> {
         .endpoint(handle_message);
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![conversation_history, settings, storage_roles])
+        .dependencies(dptree::deps![
+            conversation_history,
+            settings,
+            saved_roles_ref
+        ])
         .default_handler(ignore_update)
         .error_handler(LoggingErrorHandler::with_custom_text(
             "An error has occurred in the dispatcher",
@@ -75,9 +91,9 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 async fn answer_command(
     bot: Bot,
     msg: Message,
-    conversation_history: ConversationHistory,
+    conversation_history: ConversationHistoryRef,
     command: Command,
-    roles: Roles,
+    roles: RolesRef,
 ) -> ResponseResult<()> {
     match command {
         Command::Test => {
@@ -109,7 +125,7 @@ pre-formatted fixed-width code block written in the Python programming language
             .await?;
         }
         Command::ListRoles => {
-            // iterate `roles` to get all roles, store in a string
+            let roles = roles.lock().await;
             let mut output = String::new();
             for (index, (name, role)) in roles.iter().enumerate() {
                 output.push_str(&escape_markdown_v2_reversed_chars(&format!(
@@ -123,14 +139,67 @@ pre-formatted fixed-width code block written in the Python programming language
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
         }
+        Command::NewRole { role_name, system } => {
+            new_role(&bot, &msg, &roles, &role_name, system)
+                .await
+                .expect("Failed to create new role");
+        }
+        Command::DeleteRole { role_name } => {
+            delete_role(bot, msg, roles, &role_name)
+                .await
+                .expect("Failed to delete role");
+        }
     }
+    Ok(())
+}
+
+async fn delete_role(
+    bot: Bot,
+    msg: Message,
+    roles: RolesRef,
+    role_name: &String,
+) -> Result<(), anyhow::Error> {
+    let mut roles = roles.lock().await;
+    if roles.remove(role_name).is_some() {
+        storages::rewrite_file(&roles).expect("Failed to write roles to file");
+        bot.send_message(
+            msg.chat.id,
+            escape_markdown_v2_reversed_chars(&format!(
+                "Role *{}* deleted successfully.",
+                role_name
+            )),
+        )
+    } else {
+        bot.send_message(msg.chat.id, format!("Role *{}* not found.", role_name))
+    }
+    .parse_mode(ParseMode::MarkdownV2)
+    .await?;
+    Ok(())
+}
+
+async fn new_role(
+    bot: &Bot,
+    msg: &Message,
+    roles: &RolesRef,
+    role_name: &String,
+    system: String,
+) -> Result<(), anyhow::Error> {
+    let mut roles = roles.lock().await;
+    roles.insert(role_name.clone(), Role { system });
+    storages::rewrite_file(&roles).expect("Failed to write roles to file");
+    bot.send_message(
+        msg.chat.id,
+        escape_markdown_v2_reversed_chars(&format!("Role *{}* added successfully.", role_name)),
+    )
+    .parse_mode(ParseMode::MarkdownV2)
+    .await?;
     Ok(())
 }
 
 async fn handle_message(
     bot: Bot,
     msg: Message,
-    conversation_history: ConversationHistory,
+    conversation_history: ConversationHistoryRef,
     settings: Settings,
     // cmd: Command,
 ) -> ResponseResult<()> {
