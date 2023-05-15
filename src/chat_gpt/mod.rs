@@ -9,7 +9,7 @@ pub async fn ask_chat_gpt(
 ) -> anyhow::Result<String> {
     let chat_gpt = ChatGpt::new(open_api_token);
 
-    let request = ChatGptRequestChatCompletions::new("gpt-3.5-turbo", conversation_history);
+    let request = ChatGptRequestChatCompletions::new("gpt-4", conversation_history);
 
     let res = chat_gpt
         .chat_completions(&request)
