@@ -1,4 +1,3 @@
-use std::process::Termination;
 use std::sync::Arc;
 
 use openai_chatgpt_api::ChatGptChatFormat;
@@ -39,6 +38,8 @@ enum Command {
     NewRole { role_name: String, system: String },
     #[command(description = "delete a role")]
     DeleteRole { role_name: String },
+    #[command(description = "switch role")]
+    SwitchRole { role_name: String },
 }
 
 type ConversationHistoryRef = Arc<Mutex<Vec<ChatGptChatFormat>>>;
@@ -57,6 +58,19 @@ impl Settings {
     }
 }
 
+pub fn get_default_role(roles: &Roles) -> (&str, &str) {
+    let system;
+    let _role;
+    if let Some((role_name, role)) = roles.iter().next() {
+        system = role.system.as_str();
+        _role = role_name.as_str();
+    } else {
+        system = "you are a helpful assistant.";
+        _role = "assistant";
+    }
+    (_role, system)
+}
+
 pub async fn startup() -> Result<(), anyhow::Error> {
     let settings = Settings::from_env();
     let bot = Bot::from_env();
@@ -65,13 +79,11 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 
     let ignore_update = |_upd| Box::pin(async {});
 
-    let default_system = saved_roles
-        .values()
-        .next()
-        .map(|role| role.system.as_str())
-        .unwrap_or("You are a helpful assistant.");
+    let (current_role, default_system) = get_default_role(&saved_roles);
+
     let chat_gpt_system = ChatGptChatFormat::new_system(default_system);
     let conversation_history = Arc::new(Mutex::new(vec![chat_gpt_system]));
+    let current_role = Arc::new(Mutex::new(current_role.to_string()));
 
     let saved_roles_ref = Arc::new(Mutex::new(saved_roles));
 
@@ -87,7 +99,8 @@ pub async fn startup() -> Result<(), anyhow::Error> {
         .dependencies(dptree::deps![
             conversation_history,
             settings,
-            saved_roles_ref
+            saved_roles_ref,
+            current_role
         ])
         .default_handler(ignore_update)
         .error_handler(LoggingErrorHandler::with_custom_text(
@@ -106,6 +119,7 @@ async fn answer_command(
     conversation_history: ConversationHistoryRef,
     command: Command,
     roles: RolesRef,
+    current_role: Arc<Mutex<String>>,
 ) -> ResponseResult<()> {
     match command {
         Command::Test => {
@@ -138,13 +152,16 @@ pre-formatted fixed-width code block written in the Python programming language
         }
         Command::ListRoles => {
             let roles = roles.lock().await;
+            let current_role = current_role.lock().await;
+
             let mut output = String::new();
             for (index, (name, role)) in roles.iter().enumerate() {
+                let current_sign = if &*current_role == name { "__" } else { "" };
                 output.push_str(&escape_markdown_v2_reversed_chars(&format!(
-                    "{}. *{}*: {}\n",
+                    "{}. {current_sign}*{}*: {}{current_sign}\n",
                     index + 1,
                     name,
-                    role.system
+                    role.system,
                 )));
             }
             bot.send_message(msg.chat.id, output)
@@ -161,6 +178,52 @@ pre-formatted fixed-width code block written in the Python programming language
                 .await
                 .expect("Failed to delete role");
         }
+        Command::SwitchRole { role_name } => {
+            switch_role(
+                bot,
+                msg,
+                conversation_history,
+                roles,
+                current_role,
+                &role_name,
+            )
+            .await
+            .expect("Failed to switch role");
+        }
+    }
+    Ok(())
+}
+
+async fn switch_role(
+    bot: Bot,
+    msg: Message,
+    conversation_history: ConversationHistoryRef,
+    roles: RolesRef,
+    current_role: Arc<Mutex<String>>,
+    role_name: &String,
+) -> Result<(), anyhow::Error> {
+    let mut conversation_history = conversation_history.lock().await;
+    conversation_history.clear();
+
+    let roles = roles.lock().await;
+    if let Some(role) = roles.get(role_name) {
+        let mut current_role = current_role.lock().await;
+        *current_role = role_name.clone();
+
+        conversation_history.push(ChatGptChatFormat::new_system(&role.system));
+        bot.send_message(
+            msg.chat.id,
+            escape_markdown_v2_reversed_chars(&format!("Switched to role *{role_name}*.")),
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+    } else {
+        bot.send_message(
+            msg.chat.id,
+            escape_markdown_v2_reversed_chars(&format!("Role *{role_name}* not found.")),
+        )
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
     }
     Ok(())
 }
@@ -176,13 +239,10 @@ async fn delete_role(
         storages::rewrite_file(&roles).expect("Failed to write roles to file");
         bot.send_message(
             msg.chat.id,
-            escape_markdown_v2_reversed_chars(&format!(
-                "Role *{}* deleted successfully.",
-                role_name
-            )),
+            escape_markdown_v2_reversed_chars(&format!("Role *{role_name}* deleted successfully.")),
         )
     } else {
-        bot.send_message(msg.chat.id, format!("Role *{}* not found.", role_name))
+        bot.send_message(msg.chat.id, format!("Role *{role_name}* not found."))
     }
     .parse_mode(ParseMode::MarkdownV2)
     .await?;
@@ -201,7 +261,9 @@ async fn new_role(
     storages::rewrite_file(&roles).expect("Failed to write roles to file");
     bot.send_message(
         msg.chat.id,
-        escape_markdown_v2_reversed_chars(&format!("Role *{}* added successfully.", role_name)),
+        escape_markdown_v2_reversed_chars(&format!(
+            "Role *{role_name}* added successfully. And now I'm {role_name}"
+        )),
     )
     .parse_mode(ParseMode::MarkdownV2)
     .await?;
