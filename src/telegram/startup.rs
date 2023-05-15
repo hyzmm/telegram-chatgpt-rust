@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use openai_chatgpt_api::ChatGptChatFormat;
 use teloxide::types::ParseMode;
+use teloxide::utils::command::ParseError;
 use teloxide::{prelude::*, utils::command::BotCommands};
 use tokio::sync::Mutex;
 
@@ -11,6 +12,17 @@ use crate::storages::{self};
 use crate::storages::{Role, Roles};
 use crate::utils::telegram_utils::escape_markdown_v2_reversed_chars;
 
+fn split_role_name_and_system(input: String) -> Result<(String, String), ParseError> {
+    let parts = input.splitn(2, ':').collect::<Vec<&str>>();
+    if parts.len() < 2 {
+        return Err(ParseError::TooFewArguments {
+            expected: 2,
+            found: parts.len(),
+            message: "Expected format: <role_name>:<system>".to_string(),
+        });
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
 #[derive(BotCommands, Clone)]
 #[command(
     rename_rule = "lowercase",
@@ -23,7 +35,7 @@ enum Command {
     Clear,
     #[command(description = "list all roles")]
     ListRoles,
-    #[command(parse_with = "split", description = "add a role")]
+    #[command(parse_with = split_role_name_and_system, description = "add a role")]
     NewRole { role_name: String, system: String },
     #[command(description = "delete a role")]
     DeleteRole { role_name: String },
