@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use log::info;
 use openai_chatgpt_api::ChatGptChatFormat;
 use teloxide::types::ParseMode;
 use teloxide::utils::command::ParseError;
@@ -7,8 +8,9 @@ use teloxide::{payloads::SendMessageSetters, prelude::*, types::Me, utils::comma
 use tokio::sync::Mutex;
 
 use crate::chat_gpt::ask_chat_gpt;
-use crate::storages::{self};
+use crate::storages;
 use crate::storages::{Role, Roles};
+use crate::telegram::message_helper::send_roles_using_inline_keyboard;
 use crate::utils::telegram_utils::escape_markdown_v2_reversed_chars;
 
 fn split_role_name_and_system(input: String) -> Result<(String, String), ParseError> {
@@ -40,11 +42,11 @@ enum Command {
     #[command(description = "delete a role")]
     DeleteRole { role_name: String },
     #[command(description = "switch role")]
-    SwitchRole { role_name: String },
+    SwitchRole,
 }
 
 type ConversationHistoryRef = Arc<Mutex<Vec<ChatGptChatFormat>>>;
-type RolesRef = Arc<Mutex<Roles>>;
+pub type RolesRef = Arc<Mutex<Roles>>;
 
 #[derive(Clone)]
 struct Settings {
@@ -110,7 +112,11 @@ pub async fn startup() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn switch_role(
+async fn switch_role(bot: Bot, msg: Message, roles: RolesRef) -> Result<(), anyhow::Error> {
+    send_roles_using_inline_keyboard(bot, msg, roles, "Choose a role from the list below:").await?;
+    Ok(())
+}
+async fn do_switch_role(
     bot: Bot,
     msg: Message,
     conversation_history: ConversationHistoryRef,
@@ -118,21 +124,27 @@ async fn switch_role(
     current_role: Arc<Mutex<String>>,
     role_name: &String,
 ) -> Result<(), anyhow::Error> {
-    let mut conversation_history = conversation_history.lock().await;
-    conversation_history.clear();
-
     let roles = roles.lock().await;
     if let Some(role) = roles.get(role_name) {
-        let mut current_role = current_role.lock().await;
-        *current_role = role_name.clone();
+        let mut conversation_history = conversation_history.lock().await;
+        conversation_history.clear();
 
-        conversation_history.push(ChatGptChatFormat::new_system(&role.system));
-        bot.send_message(
-            msg.chat.id,
-            escape_markdown_v2_reversed_chars(&format!("Switched to role *{role_name}*.")),
-        )
-        .parse_mode(ParseMode::MarkdownV2)
-        .await?;
+        let mut current_role = current_role.lock().await;
+        if &*current_role == role_name {
+            bot.edit_message_text(msg.chat.id, msg.id, "I'm already this role.")
+                .await?;
+        } else {
+            *current_role = role_name.clone();
+
+            conversation_history.push(ChatGptChatFormat::new_system(&role.system));
+            bot.edit_message_text(
+                msg.chat.id,
+                msg.id,
+                escape_markdown_v2_reversed_chars(&format!("Switched to role *{role_name}*.")),
+            )
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+        }
     } else {
         bot.send_message(
             msg.chat.id,
@@ -204,23 +216,14 @@ async fn message_handler(
             Ok(Command::DeleteRole { role_name }) => {
                 delete_role(bot, &msg, &roles, &role_name).await.unwrap();
             }
-            Ok(Command::SwitchRole { role_name }) => {
-                switch_role(
-                    bot,
-                    msg,
-                    conversation_history,
-                    roles,
-                    current_role,
-                    &role_name,
-                )
-                .await
-                .unwrap();
+            Ok(Command::SwitchRole) => {
+                switch_role(bot, msg, roles).await.unwrap();
             }
             Ok(Command::Test) => {
                 just_for_test(&bot, &msg).await.unwrap();
             }
             Ok(Command::ListRoles) => {
-                list_roles(&bot, &msg, roles).await.unwrap();
+                list_roles(&bot, &msg, roles, current_role).await.unwrap();
             }
             Ok(Command::Clear) => {
                 let mut conversation_history = conversation_history.lock().await;
@@ -255,12 +258,25 @@ async fn message_handler(
     Ok(())
 }
 
-async fn list_roles(bot: &Bot, msg: &Message, roles: RolesRef) -> Result<(), anyhow::Error> {
+async fn list_roles(
+    bot: &Bot,
+    msg: &Message,
+    roles: RolesRef,
+    current_role: Arc<Mutex<String>>,
+) -> Result<(), anyhow::Error> {
     let roles = roles.lock().await;
+    let current_role = current_role.lock().await;
     let roles_list = roles
         .iter()
         .enumerate()
-        .map(|(index, (name, role))| format!("{}. *{name}*: {}", index + 1, role.system))
+        .map(|(index, (name, role))| {
+            format!(
+                "{}. {underline}*{name}*: {}{underline}",
+                index + 1,
+                role.system,
+                underline = if name == &*current_role { "__" } else { "" }
+            )
+        })
         .collect::<Vec<String>>();
     bot.send_message(
         msg.chat.id,
@@ -292,19 +308,29 @@ pre-formatted fixed-width code block written in the Python programming language
     Ok(())
 }
 
-async fn callback_handler(bot: Bot, q: CallbackQuery) -> ResponseResult<()> {
-    if let Some(version) = q.data {
-        let text = format!("You chose: {version}");
+async fn callback_handler(
+    bot: Bot,
+    q: CallbackQuery,
+    conversation_history: ConversationHistoryRef,
+    roles: RolesRef,
+    current_role: Arc<Mutex<String>>,
+) -> ResponseResult<()> {
+    if let Some(new_role) = q.data {
         bot.answer_callback_query(q.id).await?;
-
-        // Edit text of the message to which the buttons were attached
-        if let Some(Message { id, chat, .. }) = q.message {
-            bot.edit_message_text(chat.id, id, text).await?;
-        } else if let Some(id) = q.inline_message_id {
-            bot.edit_message_text_inline(id, text).await?;
+        if q.message.is_none() {
+            info!("No message in callback query");
+            return Ok(());
         }
-
-        log::info!("You chose: {}", version);
+        do_switch_role(
+            bot,
+            q.message.unwrap(),
+            conversation_history,
+            roles,
+            current_role,
+            &new_role,
+        )
+        .await
+        .unwrap();
     }
 
     Ok(())
