@@ -3,7 +3,7 @@ use std::sync::Arc;
 use openai_chatgpt_api::ChatGptChatFormat;
 use teloxide::types::ParseMode;
 use teloxide::utils::command::ParseError;
-use teloxide::{prelude::*, utils::command::BotCommands};
+use teloxide::{payloads::SendMessageSetters, prelude::*, types::Me, utils::command::BotCommands};
 use tokio::sync::Mutex;
 
 use crate::chat_gpt::ask_chat_gpt;
@@ -22,6 +22,7 @@ fn split_role_name_and_system(input: String) -> Result<(String, String), ParseEr
     }
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
+
 #[derive(BotCommands, Clone)]
 #[command(
     rename_rule = "lowercase",
@@ -87,13 +88,9 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 
     let saved_roles_ref = Arc::new(Mutex::new(saved_roles));
 
-    let handler = Update::filter_message()
-        .branch(
-            dptree::entry()
-                .filter_command::<Command>()
-                .endpoint(answer_command),
-        )
-        .endpoint(handle_message);
+    let handler = dptree::entry()
+        .branch(Update::filter_message().endpoint(message_handler))
+        .branch(Update::filter_callback_query().endpoint(callback_handler));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
@@ -110,87 +107,6 @@ pub async fn startup() -> Result<(), anyhow::Error> {
         .build()
         .dispatch()
         .await;
-    Ok(())
-}
-
-async fn answer_command(
-    bot: Bot,
-    msg: Message,
-    conversation_history: ConversationHistoryRef,
-    command: Command,
-    roles: RolesRef,
-    current_role: Arc<Mutex<String>>,
-) -> ResponseResult<()> {
-    match command {
-        Command::Test => {
-            bot.send_message(msg.chat.id, r#"
-*bold \*text*
-_italic \*text_
-__underline__
-~strikethrough~
-||spoiler||
-*bold _italic bold ~italic bold strikethrough ||italic bold strikethrough spoiler||~ __underline italic bold___ bold*
-[inline URL](http://www.example.com/)
-[inline mention of a user](tg://user?id=123456789)
-![👍](tg://emoji?id=5368324170671202286)
-`inline fixed-width code`
-```
-pre-formatted fixed-width code block
-```
-```python
-pre-formatted fixed-width code block written in the Python programming language
-```"#).parse_mode(ParseMode::MarkdownV2).await?;
-        }
-        Command::Clear => {
-            let mut conversation_history = conversation_history.lock().await;
-            conversation_history.truncate(1);
-            bot.send_message(
-                msg.chat.id,
-                "Conversation history cleared, new session started.",
-            )
-            .await?;
-        }
-        Command::ListRoles => {
-            let roles = roles.lock().await;
-            let current_role = current_role.lock().await;
-
-            let mut output = String::new();
-            for (index, (name, role)) in roles.iter().enumerate() {
-                let current_sign = if &*current_role == name { "__" } else { "" };
-                output.push_str(&escape_markdown_v2_reversed_chars(&format!(
-                    "{}. {current_sign}*{}*: {}{current_sign}\n",
-                    index + 1,
-                    name,
-                    role.system,
-                )));
-            }
-            bot.send_message(msg.chat.id, output)
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-        }
-        Command::NewRole { role_name, system } => {
-            new_role(&bot, &msg, &roles, &role_name, system)
-                .await
-                .expect("Failed to create new role");
-        }
-        Command::DeleteRole { role_name } => {
-            delete_role(bot, msg, roles, &role_name)
-                .await
-                .expect("Failed to delete role");
-        }
-        Command::SwitchRole { role_name } => {
-            switch_role(
-                bot,
-                msg,
-                conversation_history,
-                roles,
-                current_role,
-                &role_name,
-            )
-            .await
-            .expect("Failed to switch role");
-        }
-    }
     Ok(())
 }
 
@@ -227,11 +143,10 @@ async fn switch_role(
     }
     Ok(())
 }
-
 async fn delete_role(
     bot: Bot,
-    msg: Message,
-    roles: RolesRef,
+    msg: &Message,
+    roles: &RolesRef,
     role_name: &String,
 ) -> Result<(), anyhow::Error> {
     let mut roles = roles.lock().await;
@@ -270,30 +185,127 @@ async fn new_role(
     Ok(())
 }
 
-async fn handle_message(
+async fn message_handler(
     bot: Bot,
     msg: Message,
     conversation_history: ConversationHistoryRef,
     settings: Settings,
-    // cmd: Command,
+    current_role: Arc<Mutex<String>>,
+    roles: RolesRef, // cmd: Command,
+    me: Me,
 ) -> ResponseResult<()> {
-    if let Some(question) = msg.text() {
-        let mut conversation_history = conversation_history.lock().await;
-        conversation_history.push(ChatGptChatFormat::new_user(question));
-        // println!("{:?}", conversation_history);
-        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-            .await?;
-        if let Ok(answer) = ask_chat_gpt(
-            settings.open_ai_api_key.as_str(),
-            conversation_history.clone(),
-        )
-        .await
-        {
-            conversation_history.push(ChatGptChatFormat::new_assistant(&answer));
-            bot.send_message(msg.chat.id, escape_markdown_v2_reversed_chars(&answer))
-                .parse_mode(ParseMode::MarkdownV2)
+    if let Some(text) = msg.text() {
+        match Command::parse(text, me.username()) {
+            Ok(Command::NewRole { role_name, system }) => {
+                new_role(&bot, &msg, &roles, &role_name, system)
+                    .await
+                    .unwrap();
+            }
+            Ok(Command::DeleteRole { role_name }) => {
+                delete_role(bot, &msg, &roles, &role_name).await.unwrap();
+            }
+            Ok(Command::SwitchRole { role_name }) => {
+                switch_role(
+                    bot,
+                    msg,
+                    conversation_history,
+                    roles,
+                    current_role,
+                    &role_name,
+                )
+                .await
+                .unwrap();
+            }
+            Ok(Command::Test) => {
+                just_for_test(&bot, &msg).await.unwrap();
+            }
+            Ok(Command::ListRoles) => {
+                list_roles(&bot, &msg, roles).await.unwrap();
+            }
+            Ok(Command::Clear) => {
+                let mut conversation_history = conversation_history.lock().await;
+                conversation_history.truncate(1);
+                bot.send_message(
+                    msg.chat.id,
+                    "Conversation history cleared, new session started.",
+                )
                 .await?;
+            }
+
+            Err(_) => {
+                let mut conversation_history = conversation_history.lock().await;
+                conversation_history.push(ChatGptChatFormat::new_user(text));
+                // println!("{:?}", conversation_history);
+                bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+                    .await?;
+                if let Ok(answer) = ask_chat_gpt(
+                    settings.open_ai_api_key.as_str(),
+                    conversation_history.clone(),
+                )
+                .await
+                {
+                    conversation_history.push(ChatGptChatFormat::new_assistant(&answer));
+                    bot.send_message(msg.chat.id, escape_markdown_v2_reversed_chars(&answer))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await?;
+                }
+            }
         }
     }
+    Ok(())
+}
+
+async fn list_roles(bot: &Bot, msg: &Message, roles: RolesRef) -> Result<(), anyhow::Error> {
+    let roles = roles.lock().await;
+    let roles_list = roles
+        .iter()
+        .enumerate()
+        .map(|(index, (name, role))| format!("{}. *{name}*: {}", index + 1, role.system))
+        .collect::<Vec<String>>();
+    bot.send_message(
+        msg.chat.id,
+        escape_markdown_v2_reversed_chars(&format!("Roles:\n{}", roles_list.join("\n"))),
+    )
+    .parse_mode(ParseMode::MarkdownV2)
+    .await?;
+    Ok(())
+}
+
+async fn just_for_test(bot: &Bot, msg: &Message) -> Result<(), anyhow::Error> {
+    bot.send_message(msg.chat.id, r#"
+*bold \*text*
+_italic \*text_
+__underline__
+~strikethrough~
+||spoiler||
+*bold _italic bold ~italic bold strikethrough ||italic bold strikethrough spoiler||~ __underline italic bold___ bold*
+[inline URL](http://www.example.com/)
+[inline mention of a user](tg://user?id=123456789)
+![👍](tg://emoji?id=5368324170671202286)
+`inline fixed-width code`
+```
+pre-formatted fixed-width code block
+```
+```python
+pre-formatted fixed-width code block written in the Python programming language
+```"#).parse_mode(ParseMode::MarkdownV2).await?;
+    Ok(())
+}
+
+async fn callback_handler(bot: Bot, q: CallbackQuery) -> ResponseResult<()> {
+    if let Some(version) = q.data {
+        let text = format!("You chose: {version}");
+        bot.answer_callback_query(q.id).await?;
+
+        // Edit text of the message to which the buttons were attached
+        if let Some(Message { id, chat, .. }) = q.message {
+            bot.edit_message_text(chat.id, id, text).await?;
+        } else if let Some(id) = q.inline_message_id {
+            bot.edit_message_text_inline(id, text).await?;
+        }
+
+        log::info!("You chose: {}", version);
+    }
+
     Ok(())
 }
