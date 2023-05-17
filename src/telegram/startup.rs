@@ -4,7 +4,7 @@ use log::info;
 use openai_chatgpt_api::ChatGptChatFormat;
 use teloxide::types::ParseMode;
 use teloxide::utils::command::ParseError;
-use teloxide::{payloads::SendMessageSetters, prelude::*, types::Me, utils::command::BotCommands};
+use teloxide::{payloads::SendMessageSetters, prelude::*, utils::command::BotCommands};
 use tokio::sync::Mutex;
 
 use crate::chat_gpt::ask_chat_gpt;
@@ -40,7 +40,7 @@ enum Command {
     #[command(parse_with = split_role_name_and_system, description = "add a role")]
     NewRole { role_name: String, system: String },
     #[command(description = "delete a role")]
-    DeleteRole { role_name: String },
+    DeleteRole,
     #[command(description = "switch role")]
     SwitchRole,
 }
@@ -91,6 +91,13 @@ pub async fn startup() -> Result<(), anyhow::Error> {
     let saved_roles_ref = Arc::new(Mutex::new(saved_roles));
 
     let handler = dptree::entry()
+        .branch(
+            Update::filter_message().branch(
+                dptree::entry()
+                    .filter_command::<Command>()
+                    .endpoint(command_handler),
+            ),
+        )
         .branch(Update::filter_message().endpoint(message_handler))
         .branch(Update::filter_callback_query().endpoint(callback_handler));
 
@@ -157,25 +164,13 @@ async fn do_switch_role(
 }
 async fn delete_role(
     bot: Bot,
-    msg: &Message,
-    roles: &RolesRef,
+    msg: Message,
+    roles: RolesRef,
     role_name: &String,
 ) -> Result<(), anyhow::Error> {
-    let mut roles = roles.lock().await;
-    if roles.remove(role_name).is_some() {
-        storages::rewrite_file(&roles).expect("Failed to write roles to file");
-        bot.send_message(
-            msg.chat.id,
-            escape_markdown_v2_reversed_chars(&format!("Role *{role_name}* deleted successfully.")),
-        )
-    } else {
-        bot.send_message(msg.chat.id, format!("Role *{role_name}* not found."))
-    }
-    .parse_mode(ParseMode::MarkdownV2)
-    .await?;
+    send_roles_using_inline_keyboard(bot, msg, roles, "Choose a role to delete:").await?;
     Ok(())
 }
-
 async fn new_role(
     bot: &Bot,
     msg: &Message,
@@ -197,62 +192,67 @@ async fn new_role(
     Ok(())
 }
 
+async fn command_handler(
+    bot: Bot,
+    msg: Message,
+    conversation_history: ConversationHistoryRef,
+    current_role: Arc<Mutex<String>>,
+    roles: RolesRef, // cmd: Command,
+    command: Command,
+) -> ResponseResult<()> {
+    match command {
+        Command::NewRole { role_name, system } => {
+            new_role(&bot, &msg, &roles, &role_name, system)
+                .await
+                .unwrap();
+        }
+        Command::DeleteRole => {
+            delete_role(bot, msg, roles).await.unwrap();
+        }
+        Command::SwitchRole => {
+            switch_role(bot, msg, roles).await.unwrap();
+        }
+        Command::Test => {
+            just_for_test(&bot, &msg).await.unwrap();
+        }
+        Command::ListRoles => {
+            list_roles(&bot, &msg, roles, current_role).await.unwrap();
+        }
+        Command::Clear => {
+            let mut conversation_history = conversation_history.lock().await;
+            conversation_history.truncate(1);
+            bot.send_message(
+                msg.chat.id,
+                "Conversation history cleared, new session started.",
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
 async fn message_handler(
     bot: Bot,
     msg: Message,
     conversation_history: ConversationHistoryRef,
     settings: Settings,
-    current_role: Arc<Mutex<String>>,
-    roles: RolesRef, // cmd: Command,
-    me: Me,
 ) -> ResponseResult<()> {
     if let Some(text) = msg.text() {
-        match Command::parse(text, me.username()) {
-            Ok(Command::NewRole { role_name, system }) => {
-                new_role(&bot, &msg, &roles, &role_name, system)
-                    .await
-                    .unwrap();
-            }
-            Ok(Command::DeleteRole { role_name }) => {
-                delete_role(bot, &msg, &roles, &role_name).await.unwrap();
-            }
-            Ok(Command::SwitchRole) => {
-                switch_role(bot, msg, roles).await.unwrap();
-            }
-            Ok(Command::Test) => {
-                just_for_test(&bot, &msg).await.unwrap();
-            }
-            Ok(Command::ListRoles) => {
-                list_roles(&bot, &msg, roles, current_role).await.unwrap();
-            }
-            Ok(Command::Clear) => {
-                let mut conversation_history = conversation_history.lock().await;
-                conversation_history.truncate(1);
-                bot.send_message(
-                    msg.chat.id,
-                    "Conversation history cleared, new session started.",
-                )
+        let mut conversation_history = conversation_history.lock().await;
+        conversation_history.push(ChatGptChatFormat::new_user(text));
+        // println!("{:?}", conversation_history);
+        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+            .await?;
+        if let Ok(answer) = ask_chat_gpt(
+            settings.open_ai_api_key.as_str(),
+            conversation_history.clone(),
+        )
+        .await
+        {
+            conversation_history.push(ChatGptChatFormat::new_assistant(&answer));
+            bot.send_message(msg.chat.id, escape_markdown_v2_reversed_chars(&answer))
+                .parse_mode(ParseMode::MarkdownV2)
                 .await?;
-            }
-
-            Err(_) => {
-                let mut conversation_history = conversation_history.lock().await;
-                conversation_history.push(ChatGptChatFormat::new_user(text));
-                // println!("{:?}", conversation_history);
-                bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-                    .await?;
-                if let Ok(answer) = ask_chat_gpt(
-                    settings.open_ai_api_key.as_str(),
-                    conversation_history.clone(),
-                )
-                .await
-                {
-                    conversation_history.push(ChatGptChatFormat::new_assistant(&answer));
-                    bot.send_message(msg.chat.id, escape_markdown_v2_reversed_chars(&answer))
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .await?;
-                }
-            }
         }
     }
     Ok(())
