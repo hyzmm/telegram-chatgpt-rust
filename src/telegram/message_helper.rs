@@ -4,13 +4,14 @@ use teloxide::types::{
 };
 use teloxide::Bot;
 
-use crate::telegram::startup::RolesRef;
+use crate::telegram::startup::{Command, RolesRef};
 
 pub async fn send_roles_using_inline_keyboard(
     bot: Bot,
     msg: Message,
     roles: RolesRef,
     text: &str,
+    command: Command,
 ) -> Result<(), anyhow::Error> {
     let roles = roles.lock().await;
 
@@ -25,7 +26,11 @@ pub async fn send_roles_using_inline_keyboard(
                     let role = *role;
                     InlineKeyboardButton::new(
                         role,
-                        InlineKeyboardButtonKind::CallbackData(role.clone()),
+                        InlineKeyboardButtonKind::CallbackData(format!(
+                            "{} {}",
+                            serde_json::to_string(&command).unwrap(),
+                            role
+                        )),
                     )
                 })
                 .collect::<Vec<InlineKeyboardButton>>()

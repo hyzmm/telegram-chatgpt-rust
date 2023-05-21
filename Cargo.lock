@@ -1152,6 +1152,7 @@ dependencies = [
  "openai_chatgpt_api",
  "pretty_env_logger",
  "serde",
+ "serde_json",
  "serde_yaml",
  "teloxide",
  "tokio",

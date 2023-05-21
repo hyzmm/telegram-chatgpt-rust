@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use log::info;
 use openai_chatgpt_api::ChatGptChatFormat;
+use serde::{Deserialize, Serialize};
 use teloxide::types::ParseMode;
 use teloxide::utils::command::ParseError;
 use teloxide::{payloads::SendMessageSetters, prelude::*, utils::command::BotCommands};
@@ -25,12 +26,12 @@ fn split_role_name_and_system(input: String) -> Result<(String, String), ParseEr
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
-#[derive(BotCommands, Clone)]
+#[derive(BotCommands, Clone, Serialize, Deserialize)]
 #[command(
     rename_rule = "lowercase",
     description = "These commands are supported:"
 )]
-enum Command {
+pub enum Command {
     #[command(description = "just for test")]
     Test,
     #[command(description = "clear conversation history and start a new session")]
@@ -120,16 +121,24 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 }
 
 async fn switch_role(bot: Bot, msg: Message, roles: RolesRef) -> Result<(), anyhow::Error> {
-    send_roles_using_inline_keyboard(bot, msg, roles, "Choose a role from the list below:").await?;
+    send_roles_using_inline_keyboard(
+        bot,
+        msg,
+        roles,
+        "Choose a role from the list below:",
+        Command::SwitchRole,
+    )
+    .await?;
     Ok(())
 }
+
 async fn do_switch_role(
     bot: Bot,
     msg: Message,
     conversation_history: ConversationHistoryRef,
     roles: RolesRef,
     current_role: Arc<Mutex<String>>,
-    role_name: &String,
+    role_name: &str,
 ) -> Result<(), anyhow::Error> {
     let roles = roles.lock().await;
     if let Some(role) = roles.get(role_name) {
@@ -137,11 +146,11 @@ async fn do_switch_role(
         conversation_history.clear();
 
         let mut current_role = current_role.lock().await;
-        if &*current_role == role_name {
+        if *current_role == role_name {
             bot.edit_message_text(msg.chat.id, msg.id, "I'm already this role.")
                 .await?;
         } else {
-            *current_role = role_name.clone();
+            *current_role = role_name.to_string();
 
             conversation_history.push(ChatGptChatFormat::new_system(&role.system));
             bot.edit_message_text(
@@ -162,15 +171,40 @@ async fn do_switch_role(
     }
     Ok(())
 }
-async fn delete_role(
+
+async fn delete_role(bot: Bot, msg: Message, roles: RolesRef) -> Result<(), anyhow::Error> {
+    send_roles_using_inline_keyboard(
+        bot,
+        msg,
+        roles,
+        "Choose a role to delete:",
+        Command::DeleteRole,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn do_delete_role(
     bot: Bot,
     msg: Message,
     roles: RolesRef,
-    role_name: &String,
+    role_name: &str,
 ) -> Result<(), anyhow::Error> {
-    send_roles_using_inline_keyboard(bot, msg, roles, "Choose a role to delete:").await?;
+    let mut roles = roles.lock().await;
+    if roles.remove(role_name).is_some() {
+        storages::rewrite_file(&roles).expect("Failed to write roles to file");
+        bot.send_message(
+            msg.chat.id,
+            escape_markdown_v2_reversed_chars(&format!("Role *{role_name}* deleted successfully.")),
+        )
+    } else {
+        bot.send_message(msg.chat.id, format!("Role *{role_name}* not found."))
+    }
+    .parse_mode(ParseMode::MarkdownV2)
+    .await?;
     Ok(())
 }
+
 async fn new_role(
     bot: &Bot,
     msg: &Message,
@@ -231,6 +265,7 @@ async fn command_handler(
 
     Ok(())
 }
+
 async fn message_handler(
     bot: Bot,
     msg: Message,
@@ -315,22 +350,39 @@ async fn callback_handler(
     roles: RolesRef,
     current_role: Arc<Mutex<String>>,
 ) -> ResponseResult<()> {
-    if let Some(new_role) = q.data {
+    if let Some(callback_data) = q.data {
         bot.answer_callback_query(q.id).await?;
         if q.message.is_none() {
             info!("No message in callback query");
             return Ok(());
         }
-        do_switch_role(
-            bot,
-            q.message.unwrap(),
-            conversation_history,
-            roles,
-            current_role,
-            &new_role,
-        )
-        .await
-        .unwrap();
+
+        let parts = callback_data.splitn(2, ' ').collect::<Vec<_>>();
+        let command = parts[0];
+        let callback_data = parts[1];
+
+        if let Ok(command) = serde_json::from_str::<Command>(command) {
+            match command {
+                Command::DeleteRole => {
+                    do_delete_role(bot, q.message.unwrap(), roles, callback_data)
+                        .await
+                        .unwrap();
+                }
+                Command::SwitchRole => {
+                    do_switch_role(
+                        bot,
+                        q.message.unwrap(),
+                        conversation_history,
+                        roles,
+                        current_role,
+                        callback_data,
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => {}
+            }
+        }
     }
 
     Ok(())
