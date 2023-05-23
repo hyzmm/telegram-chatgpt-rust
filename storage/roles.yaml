@@ -1,2 +1,4 @@
 assistant:
   system: You are my programming assistant, your reply to me can be in Markdown format.
+test:
+  system: s

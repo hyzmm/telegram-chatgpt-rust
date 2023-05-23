@@ -3,8 +3,10 @@ use std::sync::Arc;
 use log::info;
 use openai_chatgpt_api::ChatGptChatFormat;
 use serde::{Deserialize, Serialize};
+use teloxide::dispatching::dialogue;
+use teloxide::dispatching::dialogue::InMemStorage;
+use teloxide::dptree::case;
 use teloxide::types::ParseMode;
-use teloxide::utils::command::ParseError;
 use teloxide::{payloads::SendMessageSetters, prelude::*, utils::command::BotCommands};
 use tokio::sync::Mutex;
 
@@ -14,16 +16,17 @@ use crate::storages::{Role, Roles};
 use crate::telegram::message_helper::send_roles_using_inline_keyboard;
 use crate::utils::telegram_utils::escape_markdown_v2_reversed_chars;
 
-fn split_role_name_and_system(input: String) -> Result<(String, String), ParseError> {
-    let parts = input.splitn(2, ':').collect::<Vec<&str>>();
-    if parts.len() < 2 {
-        return Err(ParseError::TooFewArguments {
-            expected: 2,
-            found: parts.len(),
-            message: "Expected format: <role_name>:<system>".to_string(),
-        });
-    }
-    Ok((parts[0].to_string(), parts[1].to_string()))
+type NewRoleDialogue = Dialogue<State, InMemStorage<State>>;
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub enum State {
+    #[default]
+    None,
+    ReceiveNewRoleName,
+    ReceiveNewRoleSystem {
+        role_name: String,
+    },
 }
 
 #[derive(BotCommands, Clone, Serialize, Deserialize)]
@@ -38,8 +41,8 @@ pub enum Command {
     Clear,
     #[command(description = "list all roles")]
     ListRoles,
-    #[command(parse_with = split_role_name_and_system, description = "add a role")]
-    NewRole { role_name: String, system: String },
+    #[command(description = "add a role")]
+    NewRole,
     #[command(description = "delete a role")]
     DeleteRole,
     #[command(description = "switch role")]
@@ -91,13 +94,19 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 
     let saved_roles_ref = Arc::new(Mutex::new(saved_roles));
 
-    let handler = dptree::entry()
+    let handler = dialogue::enter::<Update, InMemStorage<State>, State, _>()
         .branch(
-            Update::filter_message().branch(
-                dptree::entry()
-                    .filter_command::<Command>()
-                    .endpoint(command_handler),
-            ),
+            Update::filter_message()
+                .branch(case![State::ReceiveNewRoleName].endpoint(receive_new_role_name))
+                .branch(
+                    case![State::ReceiveNewRoleSystem { role_name }]
+                        .endpoint(receive_new_role_system),
+                )
+                .branch(
+                    dptree::entry()
+                        .filter_command::<Command>()
+                        .branch(dptree::endpoint(command_handler)),
+                ),
         )
         .branch(Update::filter_message().endpoint(message_handler))
         .branch(Update::filter_callback_query().endpoint(callback_handler));
@@ -107,7 +116,8 @@ pub async fn startup() -> Result<(), anyhow::Error> {
             conversation_history,
             settings,
             saved_roles_ref,
-            current_role
+            current_role,
+            InMemStorage::<State>::new()
         ])
         .default_handler(ignore_update)
         .error_handler(LoggingErrorHandler::with_custom_text(
@@ -205,27 +215,78 @@ async fn do_delete_role(
     Ok(())
 }
 
-async fn new_role(
-    bot: &Bot,
-    msg: &Message,
-    roles: &RolesRef,
-    role_name: &String,
-    system: String,
-) -> Result<(), anyhow::Error> {
-    let mut roles = roles.lock().await;
-    roles.insert(role_name.clone(), Role { system });
-    storages::rewrite_file(&roles).expect("Failed to write roles to file");
+async fn start_new_role_dialogue(
+    bot: Bot,
+    msg: Message,
+    dialogue: NewRoleDialogue,
+) -> HandlerResult {
     bot.send_message(
         msg.chat.id,
-        escape_markdown_v2_reversed_chars(&format!(
-            "Role *{role_name}* added successfully. And now I'm {role_name}"
-        )),
+        "Let's start creating a role. Please tell me what is the name of the role?",
     )
-    .parse_mode(ParseMode::MarkdownV2)
     .await?;
+    dialogue.update(State::ReceiveNewRoleName).await.unwrap();
     Ok(())
 }
 
+async fn receive_new_role_name(bot: Bot, msg: Message, dialogue: NewRoleDialogue) -> HandlerResult {
+    match msg.text().map(ToOwned::to_owned) {
+        Some(role_name) => {
+            bot.send_message(
+                msg.chat.id,
+                "Next, enter the description of the role. It will be used as a system for ChatGPT.",
+            )
+            .await?;
+            dialogue
+                .update(State::ReceiveNewRoleSystem { role_name })
+                .await?
+        }
+        None => {
+            bot.send_message(msg.chat.id, "Please enter a valid role name.")
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn receive_new_role_system(
+    bot: Bot,
+    msg: Message,
+    roles: RolesRef,
+    role_name: String,
+    dialogue: NewRoleDialogue,
+) -> HandlerResult {
+    match msg.text().map(ToOwned::to_owned) {
+        Some(role_system) => {
+            create_role(&roles, &role_name, role_system).await?;
+            dialogue.update(State::None).await?;
+            bot.send_message(
+                msg.chat.id,
+                escape_markdown_v2_reversed_chars(&format!(
+                    "Role *{role_name}* added successfully. And now I'm {role_name}"
+                )),
+            )
+            .parse_mode(ParseMode::MarkdownV2)
+            .await?;
+        }
+        None => {
+            bot.send_message(msg.chat.id, "Please enter a valid role system.")
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn create_role(
+    roles: &RolesRef,
+    role_name: &str,
+    system: String,
+) -> Result<(), anyhow::Error> {
+    let mut roles = roles.lock().await;
+    roles.insert(role_name.to_string(), Role { system });
+    storages::rewrite_file(&roles).expect("Failed to write roles to file");
+    Ok(())
+}
 async fn command_handler(
     bot: Bot,
     msg: Message,
@@ -233,12 +294,11 @@ async fn command_handler(
     current_role: Arc<Mutex<String>>,
     roles: RolesRef, // cmd: Command,
     command: Command,
-) -> ResponseResult<()> {
+    dialogue: NewRoleDialogue,
+) -> HandlerResult {
     match command {
-        Command::NewRole { role_name, system } => {
-            new_role(&bot, &msg, &roles, &role_name, system)
-                .await
-                .unwrap();
+        Command::NewRole => {
+            start_new_role_dialogue(bot, msg, dialogue).await?;
         }
         Command::DeleteRole => {
             delete_role(bot, msg, roles).await.unwrap();
@@ -271,7 +331,7 @@ async fn message_handler(
     msg: Message,
     conversation_history: ConversationHistoryRef,
     settings: Settings,
-) -> ResponseResult<()> {
+) -> HandlerResult {
     if let Some(text) = msg.text() {
         let mut conversation_history = conversation_history.lock().await;
         conversation_history.push(ChatGptChatFormat::new_user(text));
@@ -349,7 +409,7 @@ async fn callback_handler(
     conversation_history: ConversationHistoryRef,
     roles: RolesRef,
     current_role: Arc<Mutex<String>>,
-) -> ResponseResult<()> {
+) -> HandlerResult {
     if let Some(callback_data) = q.data {
         bot.answer_callback_query(q.id).await?;
         if q.message.is_none() {

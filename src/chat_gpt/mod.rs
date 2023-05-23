@@ -1,4 +1,5 @@
 use anyhow::Context;
+use log::info;
 use openai_chatgpt_api::{
     ChatGpt, ChatGptChatFormat, ChatGptRequestChatCompletions, ChatGptResponse,
 };
@@ -22,5 +23,6 @@ pub async fn ask_chat_gpt(
         .get("content")
         .and_then(|e| e.as_str())
         .context("No content")?;
+    info!("ChatGPT response: {}", content);
     Ok(content.to_string())
 }
