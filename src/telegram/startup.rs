@@ -106,9 +106,9 @@ pub async fn startup() -> Result<(), anyhow::Error> {
                     dptree::entry()
                         .filter_command::<Command>()
                         .branch(dptree::endpoint(command_handler)),
-                ),
+                )
+                .branch(dptree::endpoint(message_handler)),
         )
-        .branch(Update::filter_message().endpoint(message_handler))
         .branch(Update::filter_callback_query().endpoint(callback_handler));
 
     Dispatcher::builder(bot, handler)
@@ -225,7 +225,7 @@ async fn start_new_role_dialogue(
         "Let's start creating a role. Please tell me what is the name of the role?",
     )
     .await?;
-    dialogue.update(State::ReceiveNewRoleName).await.unwrap();
+    dialogue.update(State::ReceiveNewRoleName).await?;
     Ok(())
 }
 
@@ -301,16 +301,16 @@ async fn command_handler(
             start_new_role_dialogue(bot, msg, dialogue).await?;
         }
         Command::DeleteRole => {
-            delete_role(bot, msg, roles).await.unwrap();
+            delete_role(bot, msg, roles).await?;
         }
         Command::SwitchRole => {
-            switch_role(bot, msg, roles).await.unwrap();
+            switch_role(bot, msg, roles).await?;
         }
         Command::Test => {
-            just_for_test(&bot, &msg).await.unwrap();
+            just_for_test(&bot, &msg).await?;
         }
         Command::ListRoles => {
-            list_roles(&bot, &msg, roles, current_role).await.unwrap();
+            list_roles(&bot, &msg, roles, current_role).await?;
         }
         Command::Clear => {
             let mut conversation_history = conversation_history.lock().await;
@@ -424,9 +424,7 @@ async fn callback_handler(
         if let Ok(command) = serde_json::from_str::<Command>(command) {
             match command {
                 Command::DeleteRole => {
-                    do_delete_role(bot, q.message.unwrap(), roles, callback_data)
-                        .await
-                        .unwrap();
+                    do_delete_role(bot, q.message.unwrap(), roles, callback_data).await?;
                 }
                 Command::SwitchRole => {
                     do_switch_role(
@@ -437,8 +435,7 @@ async fn callback_handler(
                         current_role,
                         callback_data,
                     )
-                    .await
-                    .unwrap();
+                    .await?;
                 }
                 _ => {}
             }
