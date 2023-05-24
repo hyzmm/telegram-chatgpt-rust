@@ -11,10 +11,10 @@ use teloxide::{payloads::SendMessageSetters, prelude::*, utils::command::BotComm
 use tokio::sync::Mutex;
 
 use crate::chat_gpt::ask_chat_gpt;
-use crate::storages;
 use crate::storages::{Role, Roles};
 use crate::telegram::message_helper::send_roles_using_inline_keyboard;
 use crate::utils::telegram_utils::escape_markdown_v2_reversed_chars;
+use crate::{chat_gpt, storages};
 
 type NewRoleDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -47,6 +47,11 @@ pub enum Command {
     DeleteRole,
     #[command(description = "switch role")]
     SwitchRole,
+    #[command(
+        rename = "trans",
+        description = "translate given text to specify language"
+    )]
+    Translate(String),
 }
 
 type ConversationHistoryRef = Arc<Mutex<Vec<ChatGptChatFormat>>>;
@@ -287,6 +292,8 @@ async fn create_role(
     storages::rewrite_file(&roles).expect("Failed to write roles to file");
     Ok(())
 }
+
+#[allow(clippy::too_many_arguments)]
 async fn command_handler(
     bot: Bot,
     msg: Message,
@@ -295,32 +302,16 @@ async fn command_handler(
     roles: RolesRef, // cmd: Command,
     command: Command,
     dialogue: NewRoleDialogue,
+    settings: Settings,
 ) -> HandlerResult {
     match command {
-        Command::NewRole => {
-            start_new_role_dialogue(bot, msg, dialogue).await?;
-        }
-        Command::DeleteRole => {
-            delete_role(bot, msg, roles).await?;
-        }
-        Command::SwitchRole => {
-            switch_role(bot, msg, roles).await?;
-        }
-        Command::Test => {
-            just_for_test(&bot, &msg).await?;
-        }
-        Command::ListRoles => {
-            list_roles(&bot, &msg, roles, current_role).await?;
-        }
-        Command::Clear => {
-            let mut conversation_history = conversation_history.lock().await;
-            conversation_history.truncate(1);
-            bot.send_message(
-                msg.chat.id,
-                "Conversation history cleared, new session started.",
-            )
-            .await?;
-        }
+        Command::NewRole => start_new_role_dialogue(bot, msg, dialogue).await?,
+        Command::DeleteRole => delete_role(bot, msg, roles).await?,
+        Command::SwitchRole => switch_role(bot, msg, roles).await?,
+        Command::Test => just_for_test(&bot, &msg).await?,
+        Command::ListRoles => list_roles(&bot, &msg, roles, current_role).await?,
+        Command::Clear => clear_conversation(&bot, &msg, conversation_history).await?,
+        Command::Translate(user_input) => translate(bot, msg, settings, user_input).await?,
     }
 
     Ok(())
@@ -442,5 +433,33 @@ async fn callback_handler(
         }
     }
 
+    Ok(())
+}
+
+async fn clear_conversation(
+    bot: &Bot,
+    msg: &Message,
+    conversation_history: ConversationHistoryRef,
+) -> HandlerResult {
+    let mut conversation_history = conversation_history.lock().await;
+    conversation_history.truncate(1);
+    bot.send_message(
+        msg.chat.id,
+        "Conversation history cleared, new session started.",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn translate(
+    bot: Bot,
+    msg: Message,
+    settings: Settings,
+    user_input: String,
+) -> HandlerResult {
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await?;
+    let output = chat_gpt::translate(settings.open_ai_api_key.as_str(), user_input).await?;
+    bot.send_message(msg.chat.id, output).await?;
     Ok(())
 }

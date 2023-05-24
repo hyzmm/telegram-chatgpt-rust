@@ -4,6 +4,10 @@ use openai_chatgpt_api::{
     ChatGpt, ChatGptChatFormat, ChatGptRequestChatCompletions, ChatGptResponse,
 };
 
+pub use translation::translate;
+
+mod translation;
+
 pub async fn ask_chat_gpt(
     open_api_token: &str,
     conversation_history: Vec<ChatGptChatFormat>,
