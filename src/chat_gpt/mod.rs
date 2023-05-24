@@ -5,8 +5,10 @@ use openai_chatgpt_api::{
 };
 
 pub use translation::translate;
+pub use variable_namer::naming_variable;
 
 mod translation;
+mod variable_namer;
 
 pub async fn ask_chat_gpt(
     open_api_token: &str,
