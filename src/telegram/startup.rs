@@ -57,6 +57,8 @@ pub enum Command {
         description = "Generate variable names based on the scene you described"
     )]
     VariableNamer(String),
+    #[command(rename = "gramcheck", description = "check grammar")]
+    CheckGrammar(String),
 }
 
 type ConversationHistoryRef = Arc<Mutex<Vec<ChatGptChatFormat>>>;
@@ -318,6 +320,7 @@ async fn command_handler(
         Command::Clear => clear_conversation(&bot, &msg, conversation_history).await?,
         Command::Translate(user_input) => translate(bot, msg, settings, user_input).await?,
         Command::VariableNamer(scene) => naming_variable(bot, msg, settings, scene).await?,
+        Command::CheckGrammar(sentance) => check_grammar(bot, msg, settings, sentance).await?,
     }
 
     Ok(())
@@ -469,6 +472,7 @@ async fn translate(
     bot.send_message(msg.chat.id, output).await?;
     Ok(())
 }
+
 async fn naming_variable(
     bot: Bot,
     msg: Message,
@@ -478,6 +482,14 @@ async fn naming_variable(
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
     let output = chat_gpt::naming_variable(settings.open_ai_api_key.as_str(), scene).await?;
+    bot.send_message(msg.chat.id, output).await?;
+    Ok(())
+}
+
+async fn check_grammar(bot: Bot, msg: Message, settings: Settings, scene: String) -> HandlerResult {
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await?;
+    let output = chat_gpt::check_grammar(settings.open_ai_api_key.as_str(), scene).await?;
     bot.send_message(msg.chat.id, output).await?;
     Ok(())
 }
