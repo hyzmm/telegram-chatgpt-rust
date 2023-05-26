@@ -268,16 +268,26 @@ async fn receive_new_role_system(
     msg: Message,
     roles: RolesRef,
     role_name: String,
+    conversation_history: ConversationHistoryRef,
+    current_role: Arc<Mutex<String>>,
     dialogue: NewRoleDialogue,
 ) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(role_system) => {
-            create_role(&roles, &role_name, role_system).await?;
+            create_role(&roles, &role_name, role_system.clone()).await?;
             dialogue.update(State::None).await?;
+
+            let mut current_role = current_role.lock().await;
+            *current_role = role_name.clone();
+
+            let mut conversation_history = conversation_history.lock().await;
+            conversation_history.clear();
+            conversation_history.push(ChatGptChatFormat::new_system(&role_system));
+
             bot.send_message(
                 msg.chat.id,
                 escape_markdown_v2_reversed_chars(&format!(
-                    "Role *{role_name}* added successfully. And now I'm {role_name}"
+                    "Role *{role_name}* added successfully,r automatically switched to the new role."
                 )),
             )
             .parse_mode(ParseMode::MarkdownV2)
