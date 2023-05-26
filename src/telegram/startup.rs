@@ -35,8 +35,6 @@ pub enum State {
     description = "These commands are supported:"
 )]
 pub enum Command {
-    #[command(description = "Just for test")]
-    Test,
     #[command(description = "Clear conversation history and start a new session")]
     Clear,
     #[command(description = "List all roles")]
@@ -319,7 +317,6 @@ async fn command_handler(
         Command::NewRole => start_new_role_dialogue(bot, msg, dialogue).await?,
         Command::DeleteRole => delete_role(bot, msg, roles).await?,
         Command::SwitchRole => switch_role(bot, msg, roles).await?,
-        Command::Test => just_for_test(&bot, &msg).await?,
         Command::ListRoles => list_roles(&bot, &msg, roles, current_role).await?,
         Command::Clear => clear_conversation(&bot, &msg, conversation_history).await?,
         Command::Translate(user_input) => translate(bot, msg, settings, user_input).await?,
@@ -383,27 +380,6 @@ async fn list_roles(
     )
     .parse_mode(ParseMode::MarkdownV2)
     .await?;
-    Ok(())
-}
-
-async fn just_for_test(bot: &Bot, msg: &Message) -> Result<(), anyhow::Error> {
-    bot.send_message(msg.chat.id, r#"
-*bold \*text*
-_italic \*text_
-__underline__
-~strikethrough~
-||spoiler||
-*bold _italic bold ~italic bold strikethrough ||italic bold strikethrough spoiler||~ __underline italic bold___ bold*
-[inline URL](http://www.example.com/)
-[inline mention of a user](tg://user?id=123456789)
-![👍](tg://emoji?id=5368324170671202286)
-`inline fixed-width code`
-```
-pre-formatted fixed-width code block
-```
-```python
-pre-formatted fixed-width code block written in the Python programming language
-```"#).parse_mode(ParseMode::MarkdownV2).await?;
     Ok(())
 }
 
