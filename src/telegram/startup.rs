@@ -35,21 +35,21 @@ pub enum State {
     description = "These commands are supported:"
 )]
 pub enum Command {
-    #[command(description = "just for test")]
+    #[command(description = "Just for test")]
     Test,
-    #[command(description = "clear conversation history and start a new session")]
+    #[command(description = "Clear conversation history and start a new session")]
     Clear,
-    #[command(description = "list all roles")]
+    #[command(description = "List all roles")]
     ListRoles,
-    #[command(description = "add a role")]
+    #[command(description = "Add a role")]
     NewRole,
-    #[command(description = "delete a role")]
+    #[command(description = "Delete a role")]
     DeleteRole,
-    #[command(description = "switch role")]
+    #[command(description = "Switch to another role")]
     SwitchRole,
     #[command(
         rename = "trans",
-        description = "translate given text to specify language"
+        description = "Translate given text to specify language"
     )]
     Translate(String),
     #[command(
@@ -57,7 +57,10 @@ pub enum Command {
         description = "Generate variable names based on the scene you described"
     )]
     VariableNamer(String),
-    #[command(rename = "gramcheck", description = "check grammar")]
+    #[command(
+        rename = "gramcheck",
+        description = "Check the grammar of the sentence and provide suggestions for improvement."
+    )]
     CheckGrammar(String),
 }
 
@@ -93,6 +96,7 @@ pub fn get_default_role(roles: &Roles) -> (&str, &str) {
 pub async fn startup() -> Result<(), anyhow::Error> {
     let settings = Settings::from_env();
     let bot = Bot::from_env();
+    bot.set_my_commands(Command::bot_commands()).await?;
 
     let saved_roles = storages::get_roles()?;
 
