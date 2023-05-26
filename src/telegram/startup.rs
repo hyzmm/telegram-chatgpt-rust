@@ -321,7 +321,7 @@ async fn command_handler(
         Command::Clear => clear_conversation(&bot, &msg, conversation_history).await?,
         Command::Translate(user_input) => translate(bot, msg, settings, user_input).await?,
         Command::VariableNamer(scene) => naming_variable(bot, msg, settings, scene).await?,
-        Command::CheckGrammar(sentance) => check_grammar(bot, msg, settings, sentance).await?,
+        Command::CheckGrammar(sentence) => check_grammar(bot, msg, settings, sentence).await?,
     }
 
     Ok(())
