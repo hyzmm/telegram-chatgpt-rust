@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use llm_chain::step::Step;
+use llm_chain::{chains::conversation::Chain, prompt};
+use llm_chain::{executor, parameters};
+use llm_chain_openai::chatgpt::Executor;
 use log::info;
-use openai_chatgpt_api::ChatGptChatFormat;
 use serde::{Deserialize, Serialize};
 use teloxide::dispatching::dialogue;
 use teloxide::dispatching::dialogue::InMemStorage;
@@ -10,7 +13,6 @@ use teloxide::types::ParseMode;
 use teloxide::{payloads::SendMessageSetters, prelude::*, utils::command::BotCommands};
 use tokio::sync::Mutex;
 
-use crate::chat_gpt::ask_chat_gpt;
 use crate::storages::{Role, Roles};
 use crate::telegram::message_helper::send_roles_using_inline_keyboard;
 use crate::utils::telegram_utils::escape_markdown_v2_reversed_chars;
@@ -19,6 +21,7 @@ use crate::{chat_gpt, storages};
 type NewRoleDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+const DEFAULT_SYSTEM: &str = "you are a helpful assistant.";
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub enum State {
     #[default]
@@ -62,18 +65,19 @@ pub enum Command {
     CheckGrammar(String),
 }
 
-type ConversationHistoryRef = Arc<Mutex<Vec<ChatGptChatFormat>>>;
+type ConversationHistoryRef = Arc<Mutex<Chain>>;
 pub type RolesRef = Arc<Mutex<Roles>>;
 
 #[derive(Clone)]
 struct Settings {
-    open_ai_api_key: String,
+    _open_ai_api_key: String,
 }
 
 impl Settings {
     fn from_env() -> Settings {
         Settings {
-            open_ai_api_key: std::env::var("OPEN_AI_API_KEY").expect("OPEN_AI_API_KEY must be set"),
+            _open_ai_api_key: std::env::var("OPEN_AI_API_KEY")
+                .expect("OPEN_AI_API_KEY must be set"),
         }
     }
 }
@@ -85,7 +89,7 @@ pub fn get_default_role(roles: &Roles) -> (&str, &str) {
         system = role.system.as_str();
         _role = role_name.as_str();
     } else {
-        system = "you are a helpful assistant.";
+        system = DEFAULT_SYSTEM;
         _role = "assistant";
     }
     (_role, system)
@@ -102,9 +106,9 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 
     let (current_role, default_system) = get_default_role(&saved_roles);
 
-    let chat_gpt_system = ChatGptChatFormat::new_system(default_system);
-    let conversation_history = Arc::new(Mutex::new(vec![chat_gpt_system]));
+    let conversation = Chain::new(prompt!(system: default_system))?;
     let current_role = Arc::new(Mutex::new(current_role.to_string()));
+    let lang_chain_exec = Arc::new(Mutex::new(executor!()?));
 
     let saved_roles_ref = Arc::new(Mutex::new(saved_roles));
 
@@ -127,11 +131,12 @@ pub async fn startup() -> Result<(), anyhow::Error> {
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![
-            conversation_history,
+            Arc::new(Mutex::new(conversation)),
             settings,
             saved_roles_ref,
             current_role,
-            InMemStorage::<State>::new()
+            InMemStorage::<State>::new(),
+            lang_chain_exec
         ])
         .default_handler(ignore_update)
         .error_handler(LoggingErrorHandler::with_custom_text(
@@ -159,15 +164,14 @@ async fn switch_role(bot: Bot, msg: Message, roles: RolesRef) -> Result<(), anyh
 async fn do_switch_role(
     bot: Bot,
     msg: Message,
-    conversation_history: ConversationHistoryRef,
+    conversation: ConversationHistoryRef,
     roles: RolesRef,
     current_role: Arc<Mutex<String>>,
     role_name: &str,
 ) -> Result<(), anyhow::Error> {
     let roles = roles.lock().await;
     if let Some(role) = roles.get(role_name) {
-        let mut conversation_history = conversation_history.lock().await;
-        conversation_history.clear();
+        let mut conversation = conversation.lock().await;
 
         let mut current_role = current_role.lock().await;
         if *current_role == role_name {
@@ -176,7 +180,7 @@ async fn do_switch_role(
         } else {
             *current_role = role_name.to_string();
 
-            conversation_history.push(ChatGptChatFormat::new_system(&role.system));
+            *conversation = Chain::new(prompt!(system: &role.system))?;
             bot.edit_message_text(
                 msg.chat.id,
                 msg.id,
@@ -268,7 +272,7 @@ async fn receive_new_role_system(
     msg: Message,
     roles: RolesRef,
     role_name: String,
-    conversation_history: ConversationHistoryRef,
+    conversation: ConversationHistoryRef,
     current_role: Arc<Mutex<String>>,
     dialogue: NewRoleDialogue,
 ) -> HandlerResult {
@@ -280,9 +284,8 @@ async fn receive_new_role_system(
             let mut current_role = current_role.lock().await;
             *current_role = role_name.clone();
 
-            let mut conversation_history = conversation_history.lock().await;
-            conversation_history.clear();
-            conversation_history.push(ChatGptChatFormat::new_system(&role_system));
+            let mut conversation = conversation.lock().await;
+            *conversation = Chain::new(prompt!(&role_system))?;
 
             bot.send_message(
                 msg.chat.id,
@@ -316,22 +319,21 @@ async fn create_role(
 async fn command_handler(
     bot: Bot,
     msg: Message,
-    conversation_history: ConversationHistoryRef,
+    conversation: ConversationHistoryRef,
     current_role: Arc<Mutex<String>>,
     roles: RolesRef, // cmd: Command,
     command: Command,
     dialogue: NewRoleDialogue,
-    settings: Settings,
 ) -> HandlerResult {
     match command {
         Command::NewRole => start_new_role_dialogue(bot, msg, dialogue).await?,
         Command::DeleteRole => delete_role(bot, msg, roles).await?,
         Command::SwitchRole => switch_role(bot, msg, roles).await?,
         Command::ListRoles => list_roles(&bot, &msg, roles, current_role).await?,
-        Command::Clear => clear_conversation(&bot, &msg, conversation_history).await?,
-        Command::Translate(user_input) => translate(bot, msg, settings, user_input).await?,
-        Command::VariableNamer(scene) => naming_variable(bot, msg, settings, scene).await?,
-        Command::CheckGrammar(sentence) => check_grammar(bot, msg, settings, sentence).await?,
+        Command::Clear => clear_conversation(&bot, &msg, conversation, current_role, roles).await?,
+        Command::Translate(user_input) => translate(bot, msg, user_input).await?,
+        Command::VariableNamer(scene) => naming_variable(bot, msg, scene).await?,
+        Command::CheckGrammar(sentence) => check_grammar(bot, msg, sentence).await?,
     }
 
     Ok(())
@@ -340,26 +342,25 @@ async fn command_handler(
 async fn message_handler(
     bot: Bot,
     msg: Message,
-    conversation_history: ConversationHistoryRef,
-    settings: Settings,
+    conversation: ConversationHistoryRef,
+    executor: Arc<Mutex<Executor>>,
 ) -> HandlerResult {
     if let Some(text) = msg.text() {
-        let mut conversation_history = conversation_history.lock().await;
-        conversation_history.push(ChatGptChatFormat::new_user(text));
-        // println!("{:?}", conversation_history);
+        let mut conversation = conversation.lock().await;
+        let executor = executor.lock().await;
+        let step = Step::for_prompt_template(prompt!(text));
         bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
             .await?;
-        if let Ok(answer) = ask_chat_gpt(
-            settings.open_ai_api_key.as_str(),
-            conversation_history.clone(),
+        let res = conversation
+            .send_message(step, &parameters!(), &*executor)
+            .await?;
+        let answer = res.to_immediate().await?;
+        bot.send_message(
+            msg.chat.id,
+            escape_markdown_v2_reversed_chars(&answer.to_string()),
         )
-        .await
-        {
-            conversation_history.push(ChatGptChatFormat::new_assistant(&answer));
-            bot.send_message(msg.chat.id, escape_markdown_v2_reversed_chars(&answer))
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-        }
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
     }
     Ok(())
 }
@@ -396,7 +397,7 @@ async fn list_roles(
 async fn callback_handler(
     bot: Bot,
     q: CallbackQuery,
-    conversation_history: ConversationHistoryRef,
+    conversation: ConversationHistoryRef,
     roles: RolesRef,
     current_role: Arc<Mutex<String>>,
 ) -> HandlerResult {
@@ -420,7 +421,7 @@ async fn callback_handler(
                     do_switch_role(
                         bot,
                         q.message.unwrap(),
-                        conversation_history,
+                        conversation,
                         roles,
                         current_role,
                         callback_data,
@@ -438,10 +439,22 @@ async fn callback_handler(
 async fn clear_conversation(
     bot: &Bot,
     msg: &Message,
-    conversation_history: ConversationHistoryRef,
+    conversation: ConversationHistoryRef,
+    current_role: Arc<Mutex<String>>,
+    roles: RolesRef,
 ) -> HandlerResult {
-    let mut conversation_history = conversation_history.lock().await;
-    conversation_history.truncate(1);
+    let mut conversation = conversation.lock().await;
+    let mut current_role = current_role.lock().await;
+    let roles = roles.lock().await;
+    match roles.get(&*current_role) {
+        Some(role) => {
+            *conversation = Chain::new(prompt!(system: &role.system))?;
+        }
+        None => {
+            *conversation = Chain::new(prompt!(system: DEFAULT_SYSTEM))?;
+            *current_role = "default".to_string();
+        }
+    }
     bot.send_message(
         msg.chat.id,
         "Conversation history cleared, new session started.",
@@ -450,36 +463,26 @@ async fn clear_conversation(
     Ok(())
 }
 
-async fn translate(
-    bot: Bot,
-    msg: Message,
-    settings: Settings,
-    user_input: String,
-) -> HandlerResult {
+async fn translate(bot: Bot, msg: Message, user_input: String) -> HandlerResult {
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
-    let output = chat_gpt::translate(settings.open_ai_api_key.as_str(), user_input).await?;
+    let output = chat_gpt::translate(user_input).await?;
     bot.send_message(msg.chat.id, output).await?;
     Ok(())
 }
 
-async fn naming_variable(
-    bot: Bot,
-    msg: Message,
-    settings: Settings,
-    scene: String,
-) -> HandlerResult {
+async fn naming_variable(bot: Bot, msg: Message, scene: String) -> HandlerResult {
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
-    let output = chat_gpt::naming_variable(settings.open_ai_api_key.as_str(), scene).await?;
+    let output = chat_gpt::naming_variable(scene).await?;
     bot.send_message(msg.chat.id, output).await?;
     Ok(())
 }
 
-async fn check_grammar(bot: Bot, msg: Message, settings: Settings, scene: String) -> HandlerResult {
+async fn check_grammar(bot: Bot, msg: Message, scene: String) -> HandlerResult {
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
-    let output = chat_gpt::check_grammar(settings.open_ai_api_key.as_str(), scene).await?;
+    let output = chat_gpt::check_grammar(scene).await?;
     bot.send_message(msg.chat.id, output).await?;
     Ok(())
 }

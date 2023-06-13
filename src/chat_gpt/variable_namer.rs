@@ -1,14 +1,12 @@
-use openai_chatgpt_api::ChatGptChatFormat;
+use llm_chain::{executor, parameters, prompt};
 
-use crate::chat_gpt::ask_chat_gpt;
-
-pub async fn naming_variable(open_api_token: &str, scene: String) -> anyhow::Result<String> {
-    let conversation_history: Vec<ChatGptChatFormat> = vec![
-        ChatGptChatFormat::new_system(
-            "Just give a variable name or method name based on the scene I ask you",
-        ),
-        ChatGptChatFormat::new_user(&scene),
-    ];
-
-    ask_chat_gpt(open_api_token, conversation_history).await
+pub async fn naming_variable(scene: String) -> anyhow::Result<String> {
+    let exec = executor!()?;
+    let res = prompt!(
+        "Just give a variable name or method name based on the scene I ask you",
+        "The scene is: {{text}}"
+    )
+    .run(&parameters!(scene), &exec)
+    .await?;
+    Ok(res.to_string())
 }

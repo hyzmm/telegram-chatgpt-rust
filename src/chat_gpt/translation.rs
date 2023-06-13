@@ -1,15 +1,13 @@
-use openai_chatgpt_api::ChatGptChatFormat;
+use llm_chain::{executor, parameters, prompt};
 
-use crate::chat_gpt::ask_chat_gpt;
-
-pub async fn translate(open_api_token: &str, user_input: String) -> anyhow::Result<String> {
+pub async fn translate(user_input: String) -> anyhow::Result<String> {
     let (lang, text) = get_lang_and_text(user_input);
-    let conversation_history: Vec<ChatGptChatFormat> = vec![
-        ChatGptChatFormat::new_system(&format!("translate input text to {lang}")),
-        ChatGptChatFormat::new_user(&text),
-    ];
+    let exec = executor!()?;
+    let res = prompt!("translate following text to {lang}", "{{text}}")
+        .run(&parameters! {"lang"=>lang, "text"=>text}, &exec)
+        .await?;
 
-    ask_chat_gpt(open_api_token, conversation_history).await
+    Ok(res.to_string())
 }
 
 fn get_lang_and_text(user_input: String) -> (String, String) {
